@@ -67,7 +67,6 @@ def check_product(url):
 
 def main():
     product_links = get_product_links()
-
     results = []
 
     for link in product_links:
@@ -76,22 +75,26 @@ def main():
 
     available = [r for r in results if r[1]]
 
+    size_text = " / ".join(TARGET_SIZES)
+
     if available:
-        subject = "✅ Zara Wishlist: XS / S StOKTA"
+        subject = f"✅ Zara Wishlist: {size_text} Stokta"
         body = "Stok bulunan ürünler:\n\n"
+
         for name, sizes, link in available:
             body += f"- {name} → {', '.join(sizes)}\n{link}\n\n"
     else:
-        subject = "❌ Zara Wishlist: XS / S YOK"
-        body = "Şu anda XS veya S stokta değil.\n\nKontrol edilen ürünler:\n"
+        subject = f"❌ Zara Wishlist: {size_text} Yok"
+        body = f"Şu anda {size_text} beden stokta değil.\n\nKontrol edilen ürünler:\n"
+
         for name, _, link in results:
             body += f"- {name}\n{link}\n"
 
     send_email(subject, body)
 
-
 if __name__ == "__main__":
     main()
+
 
 
 
