@@ -14,7 +14,7 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0"
 }
 
-TARGET_SIZES = ["XS", "S"]
+TARGET_SIZES = ["XS", "S","M","L"]
 
 
 def send_email(subject, body):
@@ -87,3 +87,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
