@@ -42,23 +42,28 @@ def get_product_links():
 def check_product(url):
     html = requests.get(url, headers=HEADERS).text
 
+    # Ürün adı
     name_match = re.search(
         r'data-qa-qualifier="product-detail-secondary-product-info-name">(.*?)<',
         html
     )
     product_name = name_match.group(1).strip() if name_match else "Ürün adı bulunamadı"
 
-    size_pattern = r'"name":"(XS|S|M|L|XL)".*?"availability":"(in_stock|low_on_stock)"'
-    matches = re.findall(size_pattern, html)
-
     found_sizes = []
 
-    for size, availability in matches:
-        if size in TARGET_SIZES:
-            found_sizes.append(size)
+    # availability bloklarını tek tek yakala
+    blocks = re.findall(r'\{[^{}]*"availability":"[^"]+"[^{}]*\}', html)
+
+    for block in blocks:
+        size_match = re.search(r'"name":"(XS|S|M|L|XL)"', block)
+        avail_match = re.search(r'"availability":"(in_stock|low_on_stock)"', block)
+
+        if size_match and avail_match:
+            size = size_match.group(1)
+            if size in TARGET_SIZES:
+                found_sizes.append(size)
 
     return product_name, list(set(found_sizes))
-
 
 def main():
     product_links = get_product_links()
@@ -87,5 +92,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
