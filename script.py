@@ -1,8 +1,11 @@
 import os
 import re
+import json
 import requests
 import smtplib
 from email.mime.text import MIMEText
+
+# ================== AYARLAR ==================
 
 WISHLIST_URL = os.getenv("WISHLIST_URL")
 
@@ -10,15 +13,18 @@ EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASS = os.getenv("EMAIL_PASS")
 TO_EMAIL = os.getenv("TO_EMAIL")
 
+STORE_ID = "11766"  # Türkiye
+TARGET_SIZES = ["XS", "S", "M", "L"]
+
 HEADERS = {
-    "User-Agent": "Mozilla/5.0"
+    "User-Agent": "Mozilla/5.0",
+    "Accept": "application/json,text/html"
 }
 
-TARGET_SIZES = ["XS", "S","M","L"]
-
+# ================== MAIL ==================
 
 def send_email(subject, body):
-    msg = MIMEText(body)
+    msg = MIMEText(body, "plain", "utf-8")
     msg["Subject"] = subject
     msg["From"] = EMAIL_USER
     msg["To"] = TO_EMAIL
@@ -28,73 +34,89 @@ def send_email(subject, body):
         s.login(EMAIL_USER, EMAIL_PASS)
         s.send_message(msg)
 
+# ================== WISHLIST ==================
 
-def get_product_links():
+def get_product_ids():
     html = requests.get(WISHLIST_URL, headers=HEADERS).text
+    ids = set(re.findall(r'"productId":(\d+)', html))
+    return list(ids)
 
-    links = set(
-        re.findall(r'https://www\.zara\.com/tr/tr/[^"]+-p\d+\.html', html)
-    )
+# ================== SKU → BEDEN MAP ==================
 
-    return list(links)
+def get_sku_size_map(product_id):
+    url = f"https://www.zara.com/tr/tr/products-details/{product_id}.json"
+    r = requests.get(url, headers=HEADERS)
 
+    if r.status_code != 200:
+        return {}
 
-def check_product(url):
-    html = requests.get(url, headers=HEADERS).text
+    data = r.json()
+    sku_map = {}
 
-    # Ürün adı
-    name_match = re.search(
-        r'data-qa-qualifier="product-detail-secondary-product-info-name">(.*?)<',
-        html
-    )
-    product_name = name_match.group(1).strip() if name_match else "Ürün adı bulunamadı"
+    for color in data.get("colors", []):
+        for size in color.get("sizes", []):
+            sku = size.get("sku")
+            name = size.get("name")
+            if sku and name:
+                sku_map[sku] = name
 
+    return sku_map
+
+# ================== STOK KONTROL ==================
+
+def check_stock(product_id):
+    sku_map = get_sku_size_map(product_id)
+    if not sku_map:
+        return []
+
+    url = f"https://www.zara.com/itxrest/1/catalog/store/{STORE_ID}/product/id/{product_id}/availability"
+    r = requests.get(url, headers=HEADERS)
+
+    if r.status_code != 200:
+        return []
+
+    data = r.json()
     found_sizes = []
 
-    # availability bloklarını tek tek yakala
-    blocks = re.findall(r'\{[^{}]*"availability":"[^"]+"[^{}]*\}', html)
+    for item in data.get("skusAvailability", []):
+        sku = item.get("sku")
+        availability = item.get("availability")
 
-    for block in blocks:
-        size_match = re.search(r'"name":"(XS|S|M|L|XL)"', block)
-        avail_match = re.search(r'"availability":"(in_stock|low_on_stock)"', block)
+        size = sku_map.get(sku)
+        if (
+            size in TARGET_SIZES
+            and availability in ["in_stock", "low_on_stock"]
+        ):
+            found_sizes.append(size)
 
-        if size_match and avail_match:
-            size = size_match.group(1)
-            if size in TARGET_SIZES:
-                found_sizes.append(size)
+    return sorted(set(found_sizes))
 
-    return product_name, list(set(found_sizes))
+# ================== MAIN ==================
 
 def main():
-    product_links = get_product_links()
-    results = []
+    product_ids = get_product_ids()
+    available_products = []
 
-    for link in product_links:
-        name, sizes = check_product(link)
-        results.append((name, sizes, link))
-
-    available = [r for r in results if r[1]]
+    for pid in product_ids:
+        sizes = check_stock(pid)
+        if sizes:
+            link = f"https://www.zara.com/tr/tr/-p{pid}.html"
+            available_products.append((pid, sizes, link))
 
     size_text = " / ".join(TARGET_SIZES)
 
-    if available:
-        subject = f"✅ Zara Wishlist: {size_text} Stokta"
+    if available_products:
+        subject = f"✅ Zara Stok Geldi: {size_text}"
         body = "Stok bulunan ürünler:\n\n"
-
-        for name, sizes, link in available:
-            body += f"- {name} → {', '.join(sizes)}\n{link}\n\n"
+        for pid, sizes, link in available_products:
+            body += f"- {pid} → {', '.join(sizes)}\n{link}\n\n"
     else:
-        subject = f"❌ Zara Wishlist: {size_text} Yok"
-        body = f"Şu anda {size_text} beden stokta değil.\n\nKontrol edilen ürünler:\n"
-
-        for name, _, link in results:
-            body += f"- {name}\n{link}\n"
+        subject = f"❌ Zara Stok Yok: {size_text}"
+        body = "Şu an hedef bedenlerde stok yok.\n"
 
     send_email(subject, body)
 
+# ================== RUN ==================
+
 if __name__ == "__main__":
     main()
-
-
-
-
