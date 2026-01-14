@@ -48,16 +48,16 @@ def check_product(url):
     )
     product_name = name_match.group(1).strip() if name_match else "Ürün adı bulunamadı"
 
-    size_pattern = r'\{"availability":"(.*?)".*?"name":"(XS|S|M|L|XL)"'
+    size_pattern = r'"name":"(XS|S|M|L|XL)".*?"availability":"(in_stock|low_on_stock)"'
     matches = re.findall(size_pattern, html)
 
     found_sizes = []
 
-    for availability, size in matches:
-        if size in TARGET_SIZES and availability in ["low_on_stock", "in_stock"]:
+    for size, availability in matches:
+        if size in TARGET_SIZES:
             found_sizes.append(size)
 
-    return product_name, found_sizes
+    return product_name, list(set(found_sizes))
 
 
 def main():
@@ -87,4 +87,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
