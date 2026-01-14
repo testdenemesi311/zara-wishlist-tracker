@@ -1,4 +1,4 @@
-name: Zara Wishlist XS-S Tracker
+name: Zara Wishlist Tracker
 
 on:
   schedule:
@@ -6,25 +6,21 @@ on:
   workflow_dispatch:
 
 jobs:
-  check:
+  run:
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
 
-      - name: Install dependencies
-        run: |
-          pip install selenium python-dotenv
+      - run: pip install -r requirements.txt
 
-      - name: Run tracker
+      - run: python script.py
         env:
-          WISHLIST_URL: ${{ secrets.WISHLIST_URL }}
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
           TO_EMAIL: ${{ secrets.TO_EMAIL }}
-        run: python script.py
+          WISHLIST_URL: ${{ secrets.WISHLIST_URL }}
