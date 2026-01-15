@@ -1,26 +1,37 @@
-name: Zara Wishlist Tracker
+name: Zara Stock Checker
 
 on:
   schedule:
-    - cron: "*/30 * * * *"
-  workflow_dispatch:
+    # Her 30 dakikada bir çalışır (Saat başı ve buçuklarda)
+    - cron: "0,30 * * * *"
+  workflow_dispatch: # Manuel tetikleme butonu ekler
 
 jobs:
-  run:
+  check-stock:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v4
         with:
-          python-version: "3.10"
+          python-version: '3.10'
 
-      - run: pip install -r requirements.txt
+      - name: Install Dependencies
+        run: |
+          pip install -r requirements.txt
+          # SeleniumBase için gerekli driverları indirir
+          sbase install chromedriver
 
-      - run: python script.py
+      - name: Run Script
         env:
+          # GitHub Secrets'tan değişkenleri alıp script'e verir
+          WISHLIST_URL: ${{ secrets.WISHLIST_URL }}
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
           TO_EMAIL: ${{ secrets.TO_EMAIL }}
-          WISHLIST_URL: ${{ secrets.WISHLIST_URL }}
+        # Xvfb sanal ekranını kullanarak headless modun düzgün çalışmasını sağlar
+        run: |
+          xvfb-run python script.py
