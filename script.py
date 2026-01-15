@@ -14,138 +14,155 @@ EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASS = os.getenv("EMAIL_PASS")
 TO_EMAIL = os.getenv("TO_EMAIL")
 
-STORE_ID = "11766"  
-TARGET_SIZES = ["XS", "S", "M", "L", "XL"] # XL'ı da ekleyelim test için
+# Hangi bedenleri takip ediyoruz?
+TARGET_SIZES = ["XS", "S", "M", "L"]
 
 # ================== YARDIMCI FONKSİYONLAR ==================
 
 def send_email(subject, body):
     if not EMAIL_USER or not EMAIL_PASS:
-        print("⚠️ Mail credentials bulunamadı.")
+        print("⚠️ Mail bilgileri eksik, gönderim yapılmadı.")
         return
     try:
         msg = MIMEText(body, "plain", "utf-8")
         msg["Subject"] = subject
         msg["From"] = EMAIL_USER
         msg["To"] = TO_EMAIL
+
         with smtplib.SMTP("smtp.gmail.com", 587) as s:
             s.starttls()
             s.login(EMAIL_USER, EMAIL_PASS)
             s.send_message(msg)
-        print("✅ Mail gönderildi.")
+        print("✅ Mail başarıyla gönderildi.")
     except Exception as e:
         print(f"❌ Mail hatası: {e}")
 
-def get_json_via_browser(sb, url):
+def check_stock_via_schema(sb, product_url):
     """
-    Tarayıcıdan alınan text bazen HTML tagleri içerebilir.
-    Bunu temizleyip saf JSON'a çeviriyoruz.
+    Sayfadaki 'application/ld+json' scriptini bulur ve parse eder.
+    API çağırmaz, doğrudan HTML içindeki veriyi okur.
     """
-    sb.open(url)
-    content = sb.get_text("body") # Tüm sayfayı text olarak al
+    sb.open(product_url)
+    # Sayfanın render olması için kısa süre bekle
+    time.sleep(4) 
     
-    # Eğer tarayıcı JSON'u bir HTML içine gömdüyse temizle
-    try:
-        # Önce direkt parse etmeyi dene
-        return json.loads(content)
-    except:
-        # Hata verirse Pre tagı içindekini veya soup ile text'i almayı dene
+    soup = BeautifulSoup(sb.get_page_source(), "html.parser")
+    
+    # Tüm JSON-LD scriptlerini bul
+    scripts = soup.find_all("script", {"type": "application/ld+json"})
+    
+    product_data = []
+    
+    for script in scripts:
         try:
-            soup = BeautifulSoup(sb.get_page_source(), "html.parser")
-            # Genelde JSON verisi 'pre' tagi içinde olur
-            if soup.find("pre"):
-                text = soup.find("pre").text
-                return json.loads(text)
-            else:
-                return json.loads(soup.text)
-        except Exception as e:
-            print(f"⚠️ JSON Parse Hatası ({url}): {e}")
-            return None
+            data = json.loads(script.string)
+            
+            # Bazen data liste gelir (senin örneğindeki gibi), bazen obje gelir.
+            # Hepsini listeye çevirelim ki döngüye sokabilelim.
+            if isinstance(data, dict):
+                data = [data]
+                
+            # İçinde "Product" ve "offers" geçen veriyi arıyoruz
+            for item in data:
+                if item.get("@type") == "Product" and "offers" in item:
+                    product_data.append(item)
+                    
+        except Exception:
+            continue
+
+    if not product_data:
+        print("   ⚠️ Schema verisi bulunamadı!")
+        return [], ""
+
+    # Ürün adını ilk elemandan alalım
+    product_name = product_data[0].get("name", "Ürün")
+    available_sizes = []
+
+    print(f"   🏷️  Ürün: {product_name}")
+
+    for item in product_data:
+        size = item.get("size")
+        offer = item.get("offers", {})
+        availability = offer.get("availability", "")
+        
+        # URL formatında gelir: "https://schema.org/InStock"
+        status = "STOKTA YOK"
+        is_in_stock = False
+
+        if "InStock" in availability:
+            status = "VAR"
+            is_in_stock = True
+        elif "LimitedAvailability" in availability:
+            status = "AZ KALDI"
+            is_in_stock = True
+        
+        # Log ekranına yazdıralım
+        print(f"   👉 Beden: {size:<4} | Durum: {status}")
+
+        if size in TARGET_SIZES and is_in_stock:
+            available_sizes.append(f"{size} ({status})")
+
+    return available_sizes, product_name
 
 # ================== MAIN ==================
 
 def main():
     if not WISHLIST_URL:
-        print("❌ WISHLIST_URL eksik.")
+        print("❌ WISHLIST_URL tanımlı değil!")
         return
 
-    with SB(uc=True, headless=True, page_load_strategy="eager") as sb:
-        print("🚀 Tarayıcı başlatılıyor (Debug Modu)...")
+    # Browser'ı başlat
+    with SB(uc=True, headless=True, page_load_strategy="normal") as sb:
+        print("🚀 Tarayıcı başlatılıyor (Schema Mode)...")
         
-        # 1. Wishlist'ten ID'leri çek
+        # 1. Wishlist'ten Linkleri Topla
         try:
+            print(f"📂 Wishlist taranıyor...")
             sb.open(WISHLIST_URL)
             time.sleep(5)
             sb.scroll_to_bottom()
             time.sleep(2)
             
-            page_source = sb.get_page_source()
-            soup = BeautifulSoup(page_source, "html.parser")
+            soup = BeautifulSoup(sb.get_page_source(), "html.parser")
+            product_links = set()
             
-            product_ids = set()
-            for link in soup.find_all('a', href=True):
-                match = re.search(r'-p(\d+)\.html', link['href'])
-                if match:
-                    product_ids.add(match.group(1))
+            # Sadece ürün linklerini al, ID yerine direkt link saklıyoruz
+            for a in soup.find_all('a', href=True):
+                href = a['href']
+                # Zara ürün linki kontrolü (-p...html)
+                if "-p" in href and ".html" in href:
+                    # Linkin temiz halini alalım
+                    full_link = href if href.startswith("http") else f"https://www.zara.com{href}"
+                    product_links.add(full_link)
             
-            # Set'i listeye çevir
-            product_ids = list(product_ids)
-            print(f"📦 Bulunan ID sayısı: {len(product_ids)} -> {product_ids}")
+            print(f"📦 Bulunan Link Sayısı: {len(product_links)}")
             
         except Exception as e:
-            print(f"❌ Wishlist Hatası: {e}")
+            print(f"❌ Wishlist okuma hatası: {e}")
             return
 
         found_products = []
-        
-        # 2. Ürünleri Kontrol Et
-        for pid in product_ids:
-            print(f"\n🔎 İNCELENİYOR: {pid}")
-            api_url = f"https://www.zara.com/itxrest/3/catalog/store/{STORE_ID}/product/{pid}/detail?languageId=-1"
+
+        # 2. Her linke git ve Schema kontrolü yap
+        for link in product_links:
+            print(f"\n🔎 Linke gidiliyor: {link}")
             
-            data = get_json_via_browser(sb, api_url)
+            sizes, name = check_stock_via_schema(sb, link)
             
-            if not data:
-                print("   ❌ API verisi alınamadı (None)")
-                continue
-
-            name = data.get("name", "İsimsiz Ürün")
-            print(f"   🏷️  Ürün Adı: {name}")
-
-            # --- DETAYLI DEBUG KISMI ---
-            # Varyantları gezip ne görüyoruz yazdıralım
-            colors = data.get("detail", {}).get("colors", [])
-            if not colors:
-                 print("   ⚠️ Renk/Varyant bilgisi boş!")
-
-            sku_found = False
-            for bundle in colors:
-                for size in bundle.get("sizes", []):
-                    s_name = size.get("name")
-                    avail = size.get("availability")
-                    
-                    # Loglara her şeyi yaz (Debug için kritik)
-                    print(f"   👉 Beden: {s_name:<4} | Durum: {avail}")
-                    
-                    if s_name in TARGET_SIZES and avail in ["in_stock", "low_on_stock"]:
-                        sku_found = True
-                        found_products.append(f"👗 {name}\nBeden: {s_name} ({avail})\nLink: https://www.zara.com/tr/tr/-p{pid}.html")
+            if sizes:
+                print(f"   ✅ BULUNDU: {sizes}")
+                found_products.append(f"👗 {name}\nBedenler: {', '.join(sizes)}\n{link}")
             
-            if sku_found:
-                print("   ✅ STOK TESPİT EDİLDİ!")
-            else:
-                print("   ❌ İstenen bedenlerde stok yok.")
-
+            # Hızlı istek atıp banlanmamak için bekle
             time.sleep(2)
 
-        # 3. Sonuç Bildirimi
+        # 3. Sonuç
         if found_products:
-            # Aynı üründen birden fazla beden varsa mesajı birleştir
-            subject = "🚨 ZARA STOK BULUNDU"
+            subject = "🚨 ZARA STOK YAKALANDI!"
             body = "\n\n".join(found_products)
             send_email(subject, body)
         else:
-            print("\n🏁 Tarama bitti, mail atılacak ürün yok.")
+            print("\n🏁 Tarama bitti, stok yok.")
 
 if __name__ == "__main__":
     main()
