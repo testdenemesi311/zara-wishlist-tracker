@@ -16,7 +16,7 @@ EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASS = os.getenv("EMAIL_PASS")
 TO_EMAIL = os.getenv("TO_EMAIL")
 
-# Eğer B sütunu boş bırakılırsa aranacak varsayılan bedenler
+# Eğer B sütunu boşsa aranacaklar
 DEFAULT_SIZES = ["XS", "S", "34", "36"]
 
 HISTORY_FILE = "stock_history.json"
@@ -25,10 +25,6 @@ SHEET_NAME = "ZaraTakip"
 # ================== GOOGLE SHEETS ==================
 
 def get_tasks_from_sheet():
-    """
-    Google Sheets'ten Link (Kolon A) ve İstenen Bedenleri (Kolon B) okur.
-    Dönüş Formatı: [ (Link, [Bedenler]), ... ]
-    """
     if not GOOGLE_JSON:
         print("❌ Google Credentials bulunamadı.")
         return []
@@ -40,40 +36,27 @@ def get_tasks_from_sheet():
         client = gspread.authorize(creds)
         
         sheet = client.open(SHEET_NAME).sheet1
-        
-        # Tüm satırları al (A ve B kolonları dahil)
         rows = sheet.get_all_values()
         
         tasks = []
         print(f"📋 Tablo okunuyor... ({len(rows)} satır)")
 
         for row in rows:
-            # Satır boşsa veya link yoksa geç
-            if not row or len(row) < 1:
-                continue
-                
+            if not row or len(row) < 1: continue
             link = row[0].strip()
             
-            # Zara linki değilse geç (Başlık satırını atlar)
-            if "zara.com" not in link or "-p" not in link:
-                continue
+            if "zara.com" not in link or "-p" not in link: continue
 
-            # B Kolonu var mı? Varsa virgülle ayırıp listeye çevir
             desired_sizes = []
             if len(row) > 1 and row[1].strip():
-                # Örn: "XS, S, 36" -> ["XS", "S", "36"]
                 raw_sizes = row[1].split(',')
-                # Boşlukları temizle ve hepsini büyük harf yap (xs -> XS)
                 desired_sizes = [s.strip().upper() for s in raw_sizes if s.strip()]
             
-            # Eğer B kolonu boşsa varsayılanları kullan
             if not desired_sizes:
                 desired_sizes = DEFAULT_SIZES
 
             tasks.append((link, desired_sizes))
-            
         return tasks
-        
     except Exception as e:
         print(f"❌ Google Sheets Hatası: {e}")
         return []
@@ -85,8 +68,7 @@ def load_history():
         try:
             with open(HISTORY_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except:
-            return {}
+        except: return {}
     return {}
 
 def save_history(data):
@@ -112,18 +94,16 @@ def send_email(subject, body):
         print(f"❌ Mail hatası: {e}")
 
 def check_stock_via_schema(sb, product_url, target_sizes):
-    """
-    Belirtilen URL'de, SADECE 'target_sizes' içinde verilen bedenleri arar.
-    """
     try:
-        # v1 Renk Filtresi
+        # 1. Hedef URL'deki v1 kodunu al (Örn: 506088098)
         target_v1 = None
         v1_match = re.search(r'[?&]v1=(\d+)', product_url)
         if v1_match:
             target_v1 = v1_match.group(1)
+            print(f"   🎯 Renk Filtresi Aktif (v1): {target_v1}")
 
         sb.open(product_url)
-        time.sleep(3)
+        time.sleep(4) # Sayfa tam yüklensin diye 1 sn artırdım
         
         soup = BeautifulSoup(sb.get_page_source(), "html.parser")
         scripts = soup.find_all("script", {"type": "application/ld+json"})
@@ -138,19 +118,30 @@ def check_stock_via_schema(sb, product_url, target_sizes):
                         product_data.append(item)
             except: continue
 
-        if not product_data: return [], ""
+        if not product_data: 
+            print("   ⚠️ Veri okunamadı (Schema yok)")
+            return [], ""
 
         product_name = product_data[0].get("name", "Ürün")
         current_in_stock = set()
         
-        print(f"   🎯 Aranan Bedenler: {target_sizes}")
+        print(f"   🔍 Aranan Bedenler: {target_sizes}")
 
         for item in product_data:
-            # Renk Filtresi Kontrolü
             offer = item.get("offers", {})
             schema_url = offer.get("url", "")
-            if target_v1 and target_v1 not in schema_url:
-                continue
+            
+            # --- DÜZELTİLEN FİLTRE MANTIĞI ---
+            if target_v1:
+                # Schema linkinde başka bir v1 kodu var mı?
+                other_v1_match = re.search(r'[?&]v1=(\d+)', schema_url)
+                
+                if other_v1_match:
+                    found_v1 = other_v1_match.group(1)
+                    # Eğer Schema'da v1 var ama BİZİM v1 değilse -> ATLA (Yanlış renk)
+                    if found_v1 != target_v1:
+                        continue
+                # Eğer Schema linkinde hiç v1 yoksa (temiz linkse) -> KABUL ET (Devam et)
             
             size = item.get("size")
             availability = offer.get("availability", "")
@@ -159,23 +150,24 @@ def check_stock_via_schema(sb, product_url, target_sizes):
             if "InStock" in availability or "LimitedAvailability" in availability:
                 is_stock = True
             
-            # --- KRİTİK NOKTA: Listeden gelen özel bedenleri kontrol et ---
-            # item['size'] API'den bazen "XS " (boşluklu) gelebilir, strip() yapıyoruz.
-            if size and size.strip().upper() in target_sizes and is_stock:
-                current_in_stock.add(size.strip())
+            # Beden kontrolü
+            if size and size.strip().upper() in target_sizes:
+                status = "VAR" if is_stock else "Yok"
+                print(f"      - {size.strip()}: {status}") # Detaylı log
+                
+                if is_stock:
+                    current_in_stock.add(size.strip())
 
         return sorted(list(current_in_stock)), product_name
 
     except Exception as e:
-        print(f"⚠️ Link Hatası ({product_url}): {e}")
+        print(f"⚠️ Hata ({product_url}): {e}")
         return [], ""
 
 # ================== MAIN ==================
 
 def main():
-    # 1. Sheet'ten görevleri al: [(Link1, ['XS']), (Link2, ['36', '38'])]
     tasks = get_tasks_from_sheet()
-    
     if not tasks:
         print("❌ Takip edilecek link yok.")
         return
@@ -185,19 +177,16 @@ def main():
     email_messages = []
 
     with SB(uc=True, headless=True, page_load_strategy="normal") as sb:
-        print("🚀 Stok kontrolü başlıyor (Kişiselleştirilmiş Mod)...")
+        print("🚀 Stok kontrolü başlıyor...")
 
         for link, desired_sizes in tasks:
-            display_link = link.split('?')[0]
-            print(f"\n🔎 İnceleniyor: {display_link}")
+            # Artık logda TAM linki gösteriyoruz ki v1 var mı görelim
+            print(f"\n🔎 {link}")
             
-            # Fonksiyona artık o satırın özel beden listesini gönderiyoruz
             sizes_now, name = check_stock_via_schema(sb, link, desired_sizes)
             
-            # Geçmişe kaydet
             current_state[link] = sizes_now
             
-            # Karşılaştırma
             sizes_old = history.get(link, [])
             new_arrivals = set(sizes_now) - set(sizes_old)
             
@@ -206,7 +195,7 @@ def main():
                 print(f"   {found_msg}")
                 email_messages.append(f"👗 {name}\n🎯 Aradığın: {', '.join(desired_sizes)}\n✨ Bulunan: {', '.join(new_arrivals)}\n{link}")
             elif sizes_now:
-                print(f"   ℹ️ Stok var ama yeni değil: {sizes_now}")
+                print(f"   ℹ️ Stok var (Değişiklik yok): {sizes_now}")
             else:
                 print("   💤 Stok yok.")
             
@@ -215,11 +204,11 @@ def main():
     save_history(current_state)
     
     if email_messages:
-        subject = "🚨 ZARA: ARADIĞIN BEDENLER GELDİ!"
-        body = "Listendeki özel bedenler stokta:\n\n" + "\n\n".join(email_messages)
+        subject = "🚨 ZARA: YAKALANDI!"
+        body = "Aşağıdaki ürünlerde yeni stok girişi tespit edildi:\n\n" + "\n\n".join(email_messages)
         send_email(subject, body)
     else:
-        print("\n🏁 Değişiklik yok.")
+        print("\n🏁 Taramada değişiklik bulunamadı.")
 
 if __name__ == "__main__":
     main()
