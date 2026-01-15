@@ -16,7 +16,6 @@ EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASS = os.getenv("EMAIL_PASS")
 TO_EMAIL = os.getenv("TO_EMAIL")
 
-# Eğer B sütunu boşsa aranacaklar
 DEFAULT_SIZES = ["XS", "S", "34", "36"]
 
 HISTORY_FILE = "stock_history.json"
@@ -95,15 +94,15 @@ def send_email(subject, body):
 
 def check_stock_via_schema(sb, product_url, target_sizes):
     try:
-        # 1. Hedef URL'deki v1 kodunu al (Örn: 506088098)
+        # 1. Hedef URL'deki v1 kodunu al
         target_v1 = None
         v1_match = re.search(r'[?&]v1=(\d+)', product_url)
         if v1_match:
             target_v1 = v1_match.group(1)
-            print(f"   🎯 Renk Filtresi Aktif (v1): {target_v1}")
+            print(f"   🎯 Renk Filtresi (v1): {target_v1}")
 
         sb.open(product_url)
-        time.sleep(4) # Sayfa tam yüklensin diye 1 sn artırdım
+        time.sleep(4)
         
         soup = BeautifulSoup(sb.get_page_source(), "html.parser")
         scripts = soup.find_all("script", {"type": "application/ld+json"})
@@ -123,25 +122,25 @@ def check_stock_via_schema(sb, product_url, target_sizes):
             return [], ""
 
         product_name = product_data[0].get("name", "Ürün")
-        current_in_stock = set()
         
-        print(f"   🔍 Aranan Bedenler: {target_sizes}")
+        # --- YENİ MANTIK: SONUÇLARI ÖNCE TOPLA ---
+        # Her beden için varsayılan durum "Yok"
+        # Beden: Durum
+        size_status_map = {size: "Yok" for size in target_sizes}
+        
+        found_any_data_for_target_sizes = False
 
         for item in product_data:
             offer = item.get("offers", {})
             schema_url = offer.get("url", "")
             
-            # --- DÜZELTİLEN FİLTRE MANTIĞI ---
+            # v1 Filtresi
             if target_v1:
-                # Schema linkinde başka bir v1 kodu var mı?
                 other_v1_match = re.search(r'[?&]v1=(\d+)', schema_url)
-                
                 if other_v1_match:
                     found_v1 = other_v1_match.group(1)
-                    # Eğer Schema'da v1 var ama BİZİM v1 değilse -> ATLA (Yanlış renk)
                     if found_v1 != target_v1:
                         continue
-                # Eğer Schema linkinde hiç v1 yoksa (temiz linkse) -> KABUL ET (Devam et)
             
             size = item.get("size")
             availability = offer.get("availability", "")
@@ -150,15 +149,31 @@ def check_stock_via_schema(sb, product_url, target_sizes):
             if "InStock" in availability or "LimitedAvailability" in availability:
                 is_stock = True
             
-            # Beden kontrolü
-            if size and size.strip().upper() in target_sizes:
-                status = "VAR" if is_stock else "Yok"
-                print(f"      - {size.strip()}: {status}") # Detaylı log
-                
-                if is_stock:
-                    current_in_stock.add(size.strip())
+            # Eğer bu veri bloğundaki beden bizim hedef listemizdeyse
+            if size:
+                clean_size = size.strip().upper()
+                if clean_size in target_sizes:
+                    found_any_data_for_target_sizes = True
+                    # EĞER STOK VARSA -> Haritayı güncelle ve "VAR" olarak kilitle
+                    # (Daha sonraki blok "Yok" dese bile "VAR" kalacak)
+                    if is_stock:
+                        size_status_map[clean_size] = "VAR"
 
-        return sorted(list(current_in_stock)), product_name
+        # --- TEMİZ RAPORLAMA ---
+        print(f"   🔍 Aranan Bedenler: {target_sizes}")
+        
+        final_in_stock_list = []
+        
+        if not found_any_data_for_target_sizes:
+             print("      ⚠️ Bu renk/beden kombinasyonu verilerde bulunamadı.")
+        else:
+            for size in target_sizes:
+                status = size_status_map.get(size, "Yok")
+                print(f"      - {size}: {status}")
+                if status == "VAR":
+                    final_in_stock_list.append(size)
+
+        return sorted(final_in_stock_list), product_name
 
     except Exception as e:
         print(f"⚠️ Hata ({product_url}): {e}")
@@ -180,7 +195,6 @@ def main():
         print("🚀 Stok kontrolü başlıyor...")
 
         for link, desired_sizes in tasks:
-            # Artık logda TAM linki gösteriyoruz ki v1 var mı görelim
             print(f"\n🔎 {link}")
             
             sizes_now, name = check_stock_via_schema(sb, link, desired_sizes)
