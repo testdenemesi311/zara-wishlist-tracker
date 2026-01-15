@@ -14,9 +14,25 @@ EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASS = os.getenv("EMAIL_PASS")
 TO_EMAIL = os.getenv("TO_EMAIL")
 
-TARGET_SIZES = ["XS", "S", "M", "L"]
+TARGET_SIZES = ["XS", "S"]
+HISTORY_FILE = "stock_history.json"
 
 # ================== YARDIMCI FONKSİYONLAR ==================
+
+def load_history():
+    """Önceki taramadan kalan stok verilerini yükler."""
+    if os.path.exists(HISTORY_FILE):
+        try:
+            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def save_history(data):
+    """Güncel stok verilerini dosyaya kaydeder."""
+    with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
 
 def send_email(subject, body):
     if not EMAIL_USER or not EMAIL_PASS:
@@ -32,29 +48,24 @@ def send_email(subject, body):
             s.starttls()
             s.login(EMAIL_USER, EMAIL_PASS)
             s.send_message(msg)
-        print("✅ Mail gönderildi.")
+        print("✅ Mail başarıyla gönderildi.")
     except Exception as e:
         print(f"❌ Mail hatası: {e}")
 
 def check_stock_via_schema(sb, product_url):
-    """
-    Sayfadaki Schema.org verisini okur.
-    """
     sb.open(product_url)
-    time.sleep(3) # Sayfanın oturması için bekle
+    time.sleep(3)
     
     soup = BeautifulSoup(sb.get_page_source(), "html.parser")
     scripts = soup.find_all("script", {"type": "application/ld+json"})
     
     product_data = []
     
-    # Tüm JSON bloklarını tara
     for script in scripts:
         try:
             data = json.loads(script.string)
             if isinstance(data, dict):
                 data = [data]
-            
             for item in data:
                 if item.get("@type") == "Product" and "offers" in item:
                     product_data.append(item)
@@ -62,39 +73,26 @@ def check_stock_via_schema(sb, product_url):
             continue
 
     if not product_data:
-        print("   ⚠️ Schema verisi bulunamadı!")
         return [], ""
 
     product_name = product_data[0].get("name", "Ürün")
     
-    # Set kullanarak aynı bedenin 2 kere yazılmasını engelliyoruz
-    found_sizes_set = set()
-
-    print(f"   🏷️  Ürün: {product_name}")
-
+    # Şu an stokta olan hedef bedenleri bul
+    current_in_stock = set()
+    
     for item in product_data:
         size = item.get("size")
         offer = item.get("offers", {})
         availability = offer.get("availability", "")
         
-        status_text = "YOK"
         is_stock = False
-
-        if "InStock" in availability:
-            status_text = "VAR"
-            is_stock = True
-        elif "LimitedAvailability" in availability:
-            status_text = "AZ KALDI"
+        if "InStock" in availability or "LimitedAvailability" in availability:
             is_stock = True
         
-        # Loga bas (Debug için)
-        print(f"   👉 {size:<4} : {status_text}")
-
         if size in TARGET_SIZES and is_stock:
-            found_sizes_set.add(f"{size} ({status_text})")
+            current_in_stock.add(size)
 
-    # Set'i listeye çevirip sırala
-    return sorted(list(found_sizes_set)), product_name
+    return sorted(list(current_in_stock)), product_name
 
 # ================== MAIN ==================
 
@@ -103,12 +101,18 @@ def main():
         print("❌ WISHLIST_URL eksik.")
         return
 
+    # Geçmiş veriyi yükle
+    history = load_history()
+    # Bu turdaki güncel durumu saklayacağımız sözlük
+    current_state = {}
+    
+    email_messages = []
+
     with SB(uc=True, headless=True, page_load_strategy="normal") as sb:
-        print("🚀 Tarayıcı başlatılıyor...")
+        print("🚀 Akıllı Stok Kontrolü Başlıyor...")
         
-        # --- ADIM 1: LİNKLERİ TOPLA ---
+        # --- LİNKLERİ TOPLA ---
         try:
-            print(f"📂 Wishlist taranıyor...")
             sb.open(WISHLIST_URL)
             time.sleep(5)
             sb.scroll_to_bottom()
@@ -119,44 +123,56 @@ def main():
             
             for a in soup.find_all('a', href=True):
                 href = a['href']
-                
-                # --- İYİLEŞTİRME BURADA ---
-                # Sadece içinde "-p" ve sonrasında RAKAM olanları al.
-                # Örn: ...-p123456.html (Geçerli)
-                # Örn: ...pantolon-l123.html (Geçersiz)
                 if re.search(r'-p\d+\.html', href):
                     full_link = href if href.startswith("http") else f"https://www.zara.com{href}"
                     product_links.add(full_link)
             
-            print(f"📦 Bulunan Ürün Linki Sayısı: {len(product_links)}")
+            print(f"📦 Taranacak Ürün Sayısı: {len(product_links)}")
             
         except Exception as e:
-            print(f"❌ Wishlist hatası: {e}")
+            print(f"❌ Hata: {e}")
             return
 
-        found_products = []
-
-        # --- ADIM 2: KONTROL ET ---
+        # --- KONTROL ET VE KARŞILAŞTIR ---
         for link in product_links:
-            # Query parametrelerini (?v1=...) temizle ki log temiz dursun
             clean_link = link.split('?')[0]
-            print(f"\n🔎 {clean_link}")
+            print(f"🔎 {clean_link}")
             
-            sizes, name = check_stock_via_schema(sb, link)
+            sizes_now, name = check_stock_via_schema(sb, link)
             
-            if sizes:
-                print(f"   ✅ YAKALANDI: {sizes}")
-                found_products.append(f"👗 {name}\nDurum: {', '.join(sizes)}\n{clean_link}")
+            # Bu ürün için güncel durumu kaydet (JSON'a yazılacak)
+            current_state[clean_link] = sizes_now
+            
+            # --- MANTIK KISMI ---
+            # Eskiden ne vardı?
+            sizes_old = history.get(clean_link, [])
+            
+            # Yeni ne geldi? (Küme farkı işlemi: Şimdikiler - Eskiler)
+            new_arrivals = set(sizes_now) - set(sizes_old)
+            
+            if new_arrivals:
+                # Sadece YENİ gelen bedenler için bildirim oluştur
+                found_msg = f"🔥 YENİ STOK: {', '.join(new_arrivals)}"
+                print(f"   {found_msg}")
+                email_messages.append(f"👗 {name}\n{found_msg}\nTam Liste: {sizes_now}\n{clean_link}")
+            elif sizes_now:
+                print(f"   ℹ️ Stok var ama değişiklik yok ({sizes_now}) -> Mail atılmıyor.")
+            else:
+                print("   💤 Stok yok.")
             
             time.sleep(2)
 
-        # --- ADIM 3: SONUÇ ---
-        if found_products:
-            subject = "🚨 ZARA STOK ALARMI"
-            body = "\n\n".join(found_products)
-            send_email(subject, body)
-        else:
-            print("\n🏁 Tarama bitti, stok yok.")
+    # --- VERİYİ GÜNCELLE VE MAİL AT ---
+    
+    # Geçmiş dosyasını güncelle
+    save_history(current_state)
+    
+    if email_messages:
+        subject = "🚨 ZARA: YENİ BEDEN GELDİ!"
+        body = "Gözün aydın, takip ettiğin ürünlerde YENİ stok hareketleri var:\n\n" + "\n\n".join(email_messages)
+        send_email(subject, body)
+    else:
+        print("🏁 Yeni bir stok gelişmesi yok, mail atılmadı.")
 
 if __name__ == "__main__":
     main()
