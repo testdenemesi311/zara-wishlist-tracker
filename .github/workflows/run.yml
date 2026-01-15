@@ -41,4 +41,5 @@ jobs:
           git config --global user.email "bot@github.com"
           git add stock_history.json
           git commit -m "📈 Stok geçmişi güncellendi" || exit 0
+          git pull
           git push
