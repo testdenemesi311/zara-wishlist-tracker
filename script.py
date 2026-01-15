@@ -11,46 +11,41 @@ from oauth2client.service_account import ServiceAccountCredentials
 
 # ================== AYARLAR ==================
 
-# Google JSON Credentials (Secret'tan gelecek)
 GOOGLE_JSON = os.getenv("GOOGLE_CREDENTIALS")
-
 EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASS = os.getenv("EMAIL_PASS")
 TO_EMAIL = os.getenv("TO_EMAIL")
 
-TARGET_SIZES = ["XS", "S"]
-HISTORY_FILE = "stock_history.json"
-SHEET_NAME = "ZaraTakip" # Google Sheet dosyanın adı ile aynı olmalı!
+# Hem harf hem sayı bedenleri (Pantolon, Kot, Üst Giyim)
+TARGET_SIZES = ["XS", "S", "34", "36", "38", "25", "26", "27"]
 
-# ================== GOOGLE SHEETS BAĞLANTISI ==================
+HISTORY_FILE = "stock_history.json"
+SHEET_NAME = "ZaraTakip"
+
+# ================== GOOGLE SHEETS ==================
 
 def get_links_from_sheet():
-    """Google Sheets'e bağlanır ve A sütunundaki linkleri çeker."""
     if not GOOGLE_JSON:
         print("❌ Google Credentials bulunamadı.")
         return []
 
     try:
-        # JSON stringini dict'e çevir
         creds_dict = json.loads(GOOGLE_JSON)
-        
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
         
-        # Tabloyu aç
         sheet = client.open(SHEET_NAME).sheet1
-        
-        # 1. Sütundaki (A sütunu) tüm verileri al
         links = sheet.col_values(1)
         
-        # Zara linki olmayanları ve başlıkları temizle
         valid_links = []
         for link in links:
+            # -p ürün ID'sini kontrol et ama linki BOZMA (v1 parametresi kalsın)
             if "zara.com" in link and "-p" in link:
                 valid_links.append(link.strip())
                 
         print(f"📋 Google Sheet'ten {len(valid_links)} link çekildi.")
+        # Set kullanarak tekrar edenleri temizle ama listeye çevir
         return list(set(valid_links))
         
     except Exception as e:
@@ -92,6 +87,13 @@ def send_email(subject, body):
 
 def check_stock_via_schema(sb, product_url):
     try:
+        # 1. URL içinde v1 kodu var mı? (Spesifik renk takibi)
+        target_v1 = None
+        v1_match = re.search(r'[?&]v1=(\d+)', product_url)
+        if v1_match:
+            target_v1 = v1_match.group(1)
+            print(f"   🎯 Hedef Renk Kodu (v1): {target_v1}")
+
         sb.open(product_url)
         time.sleep(3)
         
@@ -110,22 +112,35 @@ def check_stock_via_schema(sb, product_url):
 
         if not product_data: return [], ""
 
+        # Ürün adı (Genel isim)
         product_name = product_data[0].get("name", "Ürün")
         current_in_stock = set()
         
         for item in product_data:
-            size = item.get("size")
+            # 2. Schema içindeki URL'yi kontrol et
+            # Schema verisi bazen sayfadaki TÜM renkleri içerir.
+            # Eğer kullanıcı özel bir renk istediyse (v1), sadece o rengi işle.
+            
             offer = item.get("offers", {})
+            schema_url = offer.get("url", "")
+            
+            # KRİTİK FİLTRE: Eğer hedef v1 var ise ve bu item o v1'e sahip değilse -> ATLA
+            if target_v1 and target_v1 not in schema_url:
+                continue
+            
+            size = item.get("size")
             availability = offer.get("availability", "")
             
             is_stock = False
             if "InStock" in availability or "LimitedAvailability" in availability:
                 is_stock = True
             
+            # Hedef bedenlerden biri mi?
             if size in TARGET_SIZES and is_stock:
                 current_in_stock.add(size)
 
         return sorted(list(current_in_stock)), product_name
+
     except Exception as e:
         print(f"⚠️ Link Hatası ({product_url}): {e}")
         return [], ""
@@ -133,7 +148,6 @@ def check_stock_via_schema(sb, product_url):
 # ================== MAIN ==================
 
 def main():
-    # 1. Linkleri Sheet'ten al
     product_links = get_links_from_sheet()
     
     if not product_links:
@@ -145,30 +159,36 @@ def main():
     email_messages = []
 
     with SB(uc=True, headless=True, page_load_strategy="normal") as sb:
-        print("🚀 Stok kontrolü başlıyor (Sheets Modu)...")
+        print("🚀 Stok kontrolü başlıyor...")
 
         for link in product_links:
-            clean_link = link.split('?')[0]
-            print(f"🔎 {clean_link}")
+            # Loglarda temiz görünsün ama fonksiyona TAM linki gönder
+            display_link = link.split('?')[0]
+            print(f"🔎 İnceleniyor: {display_link}")
             
+            # Fonksiyona orjinal linki (v1 parametreli) gönderiyoruz
             sizes_now, name = check_stock_via_schema(sb, link)
-            current_state[clean_link] = sizes_now
             
-            sizes_old = history.get(clean_link, [])
+            # Linki geçmişe kaydederken tam haliyle kaydet (farklı renkler karışmasın)
+            current_state[link] = sizes_now
+            
+            # Geçmiş kontrolü
+            sizes_old = history.get(link, [])
             new_arrivals = set(sizes_now) - set(sizes_old)
             
             if new_arrivals:
                 found_msg = f"🔥 YENİ STOK: {', '.join(new_arrivals)}"
                 print(f"   {found_msg}")
-                email_messages.append(f"👗 {name}\n{found_msg}\nTam Liste: {sizes_now}\n{clean_link}")
+                # Mailde tıklanabilir link tam link olsun
+                email_messages.append(f"👗 {name}\n{found_msg}\nTam Liste: {sizes_now}\n{link}")
             
             time.sleep(2)
 
     save_history(current_state)
     
     if email_messages:
-        subject = "🚨 ZARA: STOK GÜNCELLEMESİ (SHEETS)"
-        body = "Takip listendeki ürünlerde hareket var:\n\n" + "\n\n".join(email_messages)
+        subject = "🚨 ZARA: YENİ STOK GELDİ!"
+        body = "Takip ettiğin ürün/renkte hareket var:\n\n" + "\n\n".join(email_messages)
         send_email(subject, body)
     else:
         print("🏁 Değişiklik yok.")
