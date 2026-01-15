@@ -5,7 +5,6 @@ on:
     - cron: "0,15,30,45 * * * *"
   workflow_dispatch:
 
-# BU KISIM ÖNEMLİ: Dosya yazma izni veriyoruz
 permissions:
   contents: write
 
@@ -29,24 +28,17 @@ jobs:
 
       - name: Run Script
         env:
-          WISHLIST_URL: ${{ secrets.WISHLIST_URL }}
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
           TO_EMAIL: ${{ secrets.TO_EMAIL }}
         run: |
           xvfb-run python script.py
 
-      # --- YENİ KISIM: DEĞİŞİKLİKLERİ KAYDET ---
       - name: Commit and Push History
         run: |
           git config --global user.name "StokBot"
           git config --global user.email "bot@github.com"
-          
-          # Eğer stock_history.json değiştiyse veya yeni oluştuysa ekle
           git add stock_history.json
-          
-          # Değişiklik varsa commit at, yoksa hata verme (|| exit 0)
           git commit -m "📈 Stok geçmişi güncellendi" || exit 0
-          
-          # Değişiklikleri repo'ya geri yükle
           git push
